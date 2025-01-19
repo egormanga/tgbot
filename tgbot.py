@@ -18,6 +18,7 @@ class TGBot(Slots):
 	webhook_port: None
 	webhook_path: None
 	webhook_url: None
+	me: ...
 	queue: ...
 	updater: ...
 	job_queue: ...
@@ -38,6 +39,8 @@ class TGBot(Slots):
 		self.dispatcher = self.updater.dispatcher
 		self.dispatcher.add_handler(LogHandler(log_filters))
 		self.dispatcher.add_error_handler(self.error_callback)
+
+		self.me = self.bot.get_me()
 
 	def run(self):
 		if (not hasattr(self, 'queue')): self.start()
@@ -72,30 +75,32 @@ class TGBot(Slots):
 	def error_callback(self, update, context):
 		logexception(context.error)
 
-	def handler(self, handler, *args, **kwargs):
+	def handler(self, handler, *args, group=telegram.ext.dispatcher.DEFAULT_GROUP, **kwargs):
 		@funcdecorator
 		def decorator(f):
-			def decorated(update, context):
+			def decorated(update, context, **kwargs):
 				def reply(text=None, message_id=None, **kwargs):
 					parseargs(kwargs, chat_id=update.effective_message.chat_id or (update.effective_chat or update.effective_user).id, text=text)
-					msg = context.bot.edit_message_text(**parseargs(kwargs, message_id=message_id)) if (message_id is not None) else context.bot.send_message(**kwargs)
+					msg = (context.bot.edit_message_text(**parseargs(kwargs, message_id=message_id))
+					       if (message_id is not None) else
+					       context.bot.send_message(**parseargs(kwargs, reply_to_message_id=update.effective_message.message_id, allow_sending_without_reply=True)))
 					context.user_data['_last_message_id'] = msg.message_id
 					return msg
 				update.reply = reply # TODO FIXME
-				return f(update, context)
-			self.dispatcher.add_handler(handler(*args, callback=decorated, **kwargs))
+				return f(update, context, **kwargs)
+			self.dispatcher.add_handler(handler(*args, callback=decorated, **kwargs), group=group)
 			return decorated
 		return decorator
 
 	@dispatch
 	def command(self, f: function): return self.command(f.__name__)(f)
 	@dispatch
-	def command(self, cmd: str, **kwargs): return self.handler(CommandHandler, cmd[1:] if (cmd.startswith('/')) else cmd, **kwargs)
+	def command(self, cmd: str, **kwargs): return self.handler(CommandHandler, (cmd[1:] if (cmd.startswith('/')) else cmd), **kwargs)
 
 	@dispatch
 	def message(self, f: function): return self.message()(f)
 	@dispatch
-	def message(self, filters=Filters.update, **kwargs): return self.handler(MessageHandler, filters, **kwargs)
+	def message(self, filters=Filters.update, group=telegram.ext.dispatcher.DEFAULT_GROUP, **kwargs): return self.handler(MessageHandler, filters=filters, group=group, **kwargs)
 
 	@dispatch
 	def callback(self, f: function): return self.callback(rf"^{f.__name__}$")(f)
@@ -122,4 +127,5 @@ class LogHandler(MessageHandler):
 if (__name__ == '__main__'): logstarted(); exit()
 else: logimported()
 
-# by Sdore, 2021
+# by Sdore, 2021-24
+#   www.sdore.me
