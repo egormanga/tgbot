@@ -9,55 +9,54 @@ from telegram.ext import *
 from telegram.error import *
 from utils import *; logstart('tgbot')
 
+
 class TGBot(Slots):
 	""" Meant to be `@singleton'-ed. """
 
+	# public:
 	token: None
 	base_url: None
 	base_file_url: None
+	webhook_host: None
 	webhook_port: None
 	webhook_path: None
 	webhook_url: None
-	me: ...
-	queue: ...
-	updater: ...
-	job_queue: ...
-	dispatcher: ...
 	persistence: None
 	proxy_url: None
-	proxy_list_url = "http://spys.me/proxy.txt"
+	proxy_list_url: "http://spys.me/proxy.txt"
 
-	def __init__(self, token=None, *, webhook_port=None, webhook_path=None, webhook_url=None, log_filters=None, **kwargs):
+	# private:
+	application: ...
+
+	@init(webhook_host=..., webhook_port=..., webhook_path=..., webhook_url=...)
+	def __init__(self, token=None, *, log_filters=None, **kwargs):
 		if (token is not None): self.token = token
-		if (webhook_port is not None): self.webhook_port = webhook_port
-		if (webhook_path is not None): self.webhook_path = webhook_path
-		if (webhook_url is not None): self.webhook_url = webhook_url
 
 		if (not self.token): raise ValueError(f"{self.__class__.__name__}.token is unspecified.")
 		if (self.proxy_url is ...): self.proxy_url = self.get_proxy()
-		self.updater = Updater(**parseargs(kwargs, token=self.token, base_url=self.base_url, base_file_url=self.base_file_url, persistence=self.persistence, request_kwargs={'proxy_url': self.proxy_url}, use_context=True))
-		self.dispatcher = self.updater.dispatcher
-		self.dispatcher.add_handler(LogHandler(log_filters))
-		self.dispatcher.add_error_handler(self.error_callback)
 
-		self.me = self.bot.get_me()
+		application = Application.builder()
+		if (self.token is not None): application.token(self.token)
+		if (self.persistence is not None): application.persistence(self.persistence)
+		if (self.base_url is not None): application.base_url(self.base_url)
+		if (self.base_file_url is not None): application.base_file_url(self.base_file_url)
+		if (self.proxy_url is not None): application.get_updates_proxy(self.proxy_url)
+		self.application = application.build(); del application
 
-	def run(self):
-		if (not hasattr(self, 'queue')): self.start()
-		self.idle()
+		self.application.add_handler(LogHandler(log_filters))
+		self.application.add_error_handler(self.error_callback)
 
-	def start(self, **kwargs):
+	def run(self, **kwargs):
 		if (self.webhook_port is not None):
-			self.queue = self.updater.start_webhook(port=int(self.webhook_port), url_path=self.webhook_path, webhook_url=self.webhook_url, **kwargs)
+			self.application.run_webhook(
+				listen=self.webhook_host,
+				port=int(self.webhook_port),
+				url_path=self.webhook_path,
+				webhook_url=self.webhook_url,
+				**kwargs
+			)
 		else:
-			self.queue = self.updater.start_polling(**kwargs)
-		self.job_queue = self.updater.job_queue
-
-	def idle(self, **kwargs):
-		self.updater.idle(**kwargs)
-
-	def stop(self):
-		self.updater.stop()
+			self.application.run_polling(**kwargs)
 
 	@classmethod
 	def get_proxy(cls, *, timeout=1):
@@ -72,24 +71,13 @@ class TGBot(Slots):
 			else: return 'https://'+i if (i) else None
 		else: raise WTFException('no proxy')
 
-	def error_callback(self, update, context):
-		logexception(context.error)
+	async def error_callback(self, update, context):
+		exception(context.error)
 
-	def handler(self, handler, *args, group=telegram.ext.dispatcher.DEFAULT_GROUP, **kwargs):
-		@funcdecorator
+	def handler(self, handler, *args, group=telegram.ext._application.DEFAULT_GROUP, **kwargs):
 		def decorator(f):
-			def decorated(update, context, **kwargs):
-				def reply(text=None, message_id=None, **kwargs):
-					parseargs(kwargs, chat_id=update.effective_message.chat_id or (update.effective_chat or update.effective_user).id, text=text)
-					msg = (context.bot.edit_message_text(**parseargs(kwargs, message_id=message_id))
-					       if (message_id is not None) else
-					       context.bot.send_message(**parseargs(kwargs, reply_to_message_id=update.effective_message.message_id, allow_sending_without_reply=True)))
-					context.user_data['_last_message_id'] = msg.message_id
-					return msg
-				update.reply = reply # TODO FIXME
-				return f(update, context, **kwargs)
-			self.dispatcher.add_handler(handler(*args, callback=decorated, **kwargs), group=group)
-			return decorated
+			self.application.add_handler(handler(*args, callback=f, **kwargs), group=group)
+			return f
 		return decorator
 
 	@dispatch
@@ -100,7 +88,7 @@ class TGBot(Slots):
 	@dispatch
 	def message(self, f: function): return self.message()(f)
 	@dispatch
-	def message(self, filters=Filters.update, group=telegram.ext.dispatcher.DEFAULT_GROUP, **kwargs): return self.handler(MessageHandler, filters=filters, group=group, **kwargs)
+	def message(self, filters_=filters.ALL, group=telegram.ext._application.DEFAULT_GROUP, **kwargs): return self.handler(MessageHandler, filters=filters_, group=group, **kwargs)
 
 	@dispatch
 	def callback(self, f: function): return self.callback(rf"^{f.__name__}$")(f)
@@ -110,22 +98,36 @@ class TGBot(Slots):
 	@dispatch
 	def command_unknown(self, f: function): return self.command_unknown()(f)
 	@dispatch
-	def command_unknown(self, filters=Filters.command, **kwargs): return self.handler(MessageHandler, filters, **kwargs)
+	def command_unknown(self, filters_=filters.COMMAND, **kwargs): return self.handler(MessageHandler, filters=filters_, **kwargs)
 
 	@property
 	def bot(self):
-		return self.updater.bot
+		return self.application.bot
+
 
 class LogHandler(MessageHandler):
-	def __init__(self, filters):
-		super().__init__(filters, None)
+	def __init__(self, filters_):
+		super().__init__(filters_, None)
 
 	def check_update(self, update):
 		if (super().check_update(update)): log(2, update)
 		return False
 
+
+class ReplyTo(filters.REPLY.__class__):
+	__slots__ = ('_to',)
+
+	def __init__(self, to_):
+		self._to = to_
+		super().__init__(name = f"filters.ReplyTo({self._to!r})")
+
+	def filter(self, message: Message) -> bool:
+		return bool(super().filter(message) and message.reply_to_message.from_user == self._to)
+filters.ReplyTo = ReplyTo
+
+
 if (__name__ == '__main__'): logstarted(); exit()
 else: logimported()
 
-# by Sdore, 2021-24
+# by Sdore, 2020-25
 #   www.sdore.me
